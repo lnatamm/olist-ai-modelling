@@ -1,85 +1,48 @@
 import pandas as pd
-from sklearn import linear_model
+import numpy as np
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
 from sklearn.preprocessing import OneHotEncoder
-from sklearn.decomposition import PCA
-olist_customers_dataset = pd.read_csv('data/olist_customers_dataset.csv')
-olist_geolocation_dataset = pd.read_csv('data/olist_geolocation_dataset.csv')
-olist_order_items_dataset = pd.read_csv('data/olist_order_items_dataset.csv')
-olist_order_payments_dataset = pd.read_csv('data/olist_order_payments_dataset.csv')
-olist_order_reviews_dataset = pd.read_csv('data/olist_order_reviews_dataset.csv')
-olist_orders_dataset = pd.read_csv('data/olist_orders_dataset.csv')
-olist_products_dataset = pd.read_csv('data/olist_products_dataset.csv')
-olist_sellers_dataset = pd.read_csv('data/olist_sellers_dataset.csv')
-product_category_name_translation = pd.read_csv('data/product_category_name_translation.csv')
 
-# Aprendizado Supervisionado
-# Regressão Linear OLS (Base Model)
-# Preço do Frete X Volume, Peso, Estado, Quantidade de Itens, Categoria do Produto
-olist_products_dataset['volume'] = olist_products_dataset['product_length_cm'] * olist_products_dataset['product_height_cm'] * olist_products_dataset['product_width_cm']
+# Carregar datasets
+order_items = pd.read_csv('data/olist_order_items_dataset.csv')
+products = pd.read_csv('data/olist_products_dataset.csv')
+orders = pd.read_csv('data/olist_orders_dataset.csv')
+customers = pd.read_csv('data/olist_customers_dataset.csv')
+sellers = pd.read_csv('data/olist_sellers_dataset.csv')
 
-# Preencher valores NaN com "Indefinido"
-olist_products_dataset['product_category_name'].fillna('Indefinido', inplace=True)
+# Feature engineering: volume e peso
+products['volume'] = products['product_length_cm'] * products['product_height_cm'] * products['product_width_cm']
+products['product_category_name'] = products['product_category_name'].fillna('Indefinido')
 
-# One-Hot Encoding da categoria do produto
-encoder = OneHotEncoder(sparse_output=False, handle_unknown='ignore')
-category_encoded = encoder.fit_transform(olist_products_dataset[['product_category_name']])
-category_encoded_df = pd.DataFrame(
-    category_encoded, 
-    columns=encoder.get_feature_names_out(['product_category_name']),
-    index=olist_products_dataset.index
-)
+# Merge dos dados
+data = order_items.merge(products, on='product_id').merge(orders, on='order_id').merge(customers, on='customer_id').merge(sellers, on='seller_id')
 
-# Concatenar as colunas codificadas com o dataset original
-olist_products_dataset = pd.concat([olist_products_dataset, category_encoded_df], axis=1)
+# Features categóricas e numéricas
+data['same_state'] = (data['customer_state'] == data['seller_state']).astype(int)
+data['customer_state'] = data['customer_state'].astype('category').cat.codes
+data['seller_state'] = data['seller_state'].astype('category').cat.codes
+data['product_category'] = data['product_category_name'].astype('category').cat.codes
 
-# Merge dos datasets para obter o preço do frete
-order_items_with_products = olist_order_items_dataset.merge(
-    olist_products_dataset, 
-    on='product_id', 
-    how='inner'
-)
+features = ['volume', 'product_weight_g', 'customer_state', 'seller_state', 'same_state', 'product_category']
+X = data[features].dropna()
+y = data.loc[X.index, 'freight_value']
 
-# Selecionar features: volume e todas as colunas de categorias
-category_columns = [col for col in olist_products_dataset.columns if col.startswith('product_category_name_')]
-features = ['volume'] + category_columns
+# Split treino/teste
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-# Remover linhas com valores NaN nas features ou target
-X = order_items_with_products[features].dropna()
-y = order_items_with_products.loc[X.index, 'freight_value']
+# Treinar modelo Random Forest
+model = RandomForestRegressor(n_estimators=100, max_depth=15, random_state=42, n_jobs=-1)
+model.fit(X_train, y_train)
 
-# Aplicar PCA para redução de dimensionalidade (80% de variância)
-pca = PCA(n_components=0.8)
-X_pca = pca.fit_transform(X)
-
-print(f"Features originais: {len(features)}")
-print(f"Componentes principais após PCA: {pca.n_components_}")
-print(f"Variância explicada: {pca.explained_variance_ratio_.sum():.4f}")
-
-# Criar e treinar o modelo de regressão linear com dados reduzidos
-model = linear_model.LinearRegression()
-model.fit(X_pca, y)
-
-print(f"R² Score: {model.score(X_pca, y):.4f}")
-
-print(f"Coeficientes - Volume: {model.coef_[0]:.6f}")
-
-print("Customers Dataset:")
-print(olist_customers_dataset.head())
-print("Geolocation Dataset:")
-print(olist_geolocation_dataset.head())
-print("Order Items Dataset:")
-print(olist_order_items_dataset.head())
-print("Order Payments Dataset:")
-print(olist_order_payments_dataset.head())
-print("Order Reviews Dataset:")
-print(olist_order_reviews_dataset.head())
-print("Orders Dataset:")
-print(olist_orders_dataset.head())
-print("Products Dataset:")
-print(olist_products_dataset.head())
-print("Sellers Dataset:")
-print(olist_sellers_dataset.head())
-print("Product Category Name Translation Dataset:")
-print(product_category_name_translation.head())
-
-print(olist_products_dataset.columns)
+# Predições e avaliação
+y_pred = model.predict(X_test)
+rmse = mean_squared_error(y_test, y_pred) ** 0.5
+tolerance = 0.2  # 20% de tolerância
+accuracy = (abs(y_test - y_pred) / y_test <= tolerance).mean() * 100
+print(f"R² Score (Teste): {r2_score(y_test, y_pred):.4f}")
+print(f"MAE: R$ {mean_absolute_error(y_test, y_pred):.2f}")
+print(f"RMSE: R$ {rmse:.2f}")
+print(f"Acertos (±20%): {accuracy:.2f}%")
+print(f"Features: {features}")
