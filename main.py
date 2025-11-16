@@ -1,85 +1,112 @@
 import pandas as pd
-from sklearn import linear_model
-from sklearn.preprocessing import OneHotEncoder
+import numpy as np
+from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.tree import DecisionTreeRegressor
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
+from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
-olist_customers_dataset = pd.read_csv('data/olist_customers_dataset.csv')
-olist_geolocation_dataset = pd.read_csv('data/olist_geolocation_dataset.csv')
-olist_order_items_dataset = pd.read_csv('data/olist_order_items_dataset.csv')
-olist_order_payments_dataset = pd.read_csv('data/olist_order_payments_dataset.csv')
-olist_order_reviews_dataset = pd.read_csv('data/olist_order_reviews_dataset.csv')
-olist_orders_dataset = pd.read_csv('data/olist_orders_dataset.csv')
-olist_products_dataset = pd.read_csv('data/olist_products_dataset.csv')
-olist_sellers_dataset = pd.read_csv('data/olist_sellers_dataset.csv')
-product_category_name_translation = pd.read_csv('data/product_category_name_translation.csv')
 
-# Aprendizado Supervisionado
-# Regressão Linear OLS (Base Model)
-# Preço do Frete X Volume, Peso, Estado, Quantidade de Itens, Categoria do Produto
-olist_products_dataset['volume'] = olist_products_dataset['product_length_cm'] * olist_products_dataset['product_height_cm'] * olist_products_dataset['product_width_cm']
+# Carregar datasets
+order_items = pd.read_csv('data/olist_order_items_dataset.csv')
+products = pd.read_csv('data/olist_products_dataset.csv')
+orders = pd.read_csv('data/olist_orders_dataset.csv')
+customers = pd.read_csv('data/olist_customers_dataset.csv')
+sellers = pd.read_csv('data/olist_sellers_dataset.csv')
 
-# Preencher valores NaN com "Indefinido"
-olist_products_dataset['product_category_name'].fillna('Indefinido', inplace=True)
+# Feature engineering: volume e peso
+products['volume'] = products['product_length_cm'] * products['product_height_cm'] * products['product_width_cm']
+products['product_category_name'] = products['product_category_name'].fillna('Indefinido')
 
-# One-Hot Encoding da categoria do produto
-encoder = OneHotEncoder(sparse_output=False, handle_unknown='ignore')
-category_encoded = encoder.fit_transform(olist_products_dataset[['product_category_name']])
-category_encoded_df = pd.DataFrame(
-    category_encoded, 
-    columns=encoder.get_feature_names_out(['product_category_name']),
-    index=olist_products_dataset.index
-)
+# Merge dos dados
+data = order_items.merge(products, on='product_id').merge(orders, on='order_id').merge(customers, on='customer_id').merge(sellers, on='seller_id')
 
-# Concatenar as colunas codificadas com o dataset original
-olist_products_dataset = pd.concat([olist_products_dataset, category_encoded_df], axis=1)
+# Features categóricas e numéricas
+data['same_state'] = (data['customer_state'] == data['seller_state']).astype(int)
+data['customer_state'] = data['customer_state'].astype('category').cat.codes
+data['seller_state'] = data['seller_state'].astype('category').cat.codes
+data['product_category'] = data['product_category_name'].astype('category').cat.codes
 
-# Merge dos datasets para obter o preço do frete
-order_items_with_products = olist_order_items_dataset.merge(
-    olist_products_dataset, 
-    on='product_id', 
-    how='inner'
-)
+features = ['volume', 'product_weight_g', 'customer_state', 'seller_state', 'same_state', 'product_category']
+X = data[features].dropna()
+y = data.loc[X.index, 'freight_value']
 
-# Selecionar features: volume e todas as colunas de categorias
-category_columns = [col for col in olist_products_dataset.columns if col.startswith('product_category_name_')]
-features = ['volume'] + category_columns
+# Split treino/teste
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-# Remover linhas com valores NaN nas features ou target
-X = order_items_with_products[features].dropna()
-y = order_items_with_products.loc[X.index, 'freight_value']
+# Normalização dos dados (necessário para PCA)
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled = scaler.transform(X_test)
 
-# Aplicar PCA para redução de dimensionalidade (80% de variância)
-pca = PCA(n_components=0.8)
-X_pca = pca.fit_transform(X)
+# Aplicar PCA para redução de dimensionalidade
+# Mantendo 95% da variância dos dados
+pca = PCA(n_components=0.95, random_state=42)
+X_train_pca = pca.fit_transform(X_train_scaled)
+X_test_pca = pca.transform(X_test_scaled)
 
-print(f"Features originais: {len(features)}")
-print(f"Componentes principais após PCA: {pca.n_components_}")
+print(f"Dimensões originais: {X_train_scaled.shape[1]}")
+print(f"Dimensões após PCA: {X_train_pca.shape[1]}")
 print(f"Variância explicada: {pca.explained_variance_ratio_.sum():.4f}")
+print(f"Features originais: {features}")
+print()
 
-# Criar e treinar o modelo de regressão linear com dados reduzidos
-model = linear_model.LinearRegression()
-model.fit(X_pca, y)
+# Definir os 3 modelos para comparação
+models = {
+    'Linear Regression': LinearRegression(),
+    'Random Forest': RandomForestRegressor(n_estimators=100, max_depth=15, min_samples_leaf=2, max_features='sqrt', random_state=42, n_jobs=-1),
+    'Decision Tree': DecisionTreeRegressor(max_depth=15, min_samples_leaf=2, ccp_alpha=0.0, random_state=42)
+}
 
-print(f"R² Score: {model.score(X_pca, y):.4f}")
+# Dicionário para armazenar resultados
+results = {}
 
-print(f"Coeficientes - Volume: {model.coef_[0]:.6f}")
+# Treinar e avaliar cada modelo
+for model_name, model in models.items():
+    print(f"{'='*60}")
+    print(f"Modelo: {model_name}")
+    print(f"{'='*60}")
+    
+    # Treinar modelo
+    model.fit(X_train_pca, y_train)
+    
+    # Predições
+    y_pred = model.predict(X_test_pca)
+    
+    # Calcular as 3 métricas obrigatórias
+    r2 = r2_score(y_test, y_pred)
+    mae = mean_absolute_error(y_test, y_pred)
+    rmse = mean_squared_error(y_test, y_pred) ** 0.5
+    
+    # Calcular acurácia com tolerância
+    tolerance = 0.2  # 20% de tolerância
+    accuracy = (abs(y_test - y_pred) / y_test <= tolerance).mean() * 100
+    
+    # Armazenar resultados
+    results[model_name] = {
+        'R²': r2,
+        'MAE': mae,
+        'RMSE': rmse,
+        'Acurácia (±20%)': accuracy
+    }
+    
+    # Exibir métricas
+    print(f"R² Score: {r2:.4f}")
+    print(f"MAE (Mean Absolute Error): R$ {mae:.2f}")
+    print(f"RMSE (Root Mean Squared Error): R$ {rmse:.2f}")
+    print(f"Predições dentro de ±20%: {accuracy:.2f}%")
+    print()
 
-print("Customers Dataset:")
-print(olist_customers_dataset.head())
-print("Geolocation Dataset:")
-print(olist_geolocation_dataset.head())
-print("Order Items Dataset:")
-print(olist_order_items_dataset.head())
-print("Order Payments Dataset:")
-print(olist_order_payments_dataset.head())
-print("Order Reviews Dataset:")
-print(olist_order_reviews_dataset.head())
-print("Orders Dataset:")
-print(olist_orders_dataset.head())
-print("Products Dataset:")
-print(olist_products_dataset.head())
-print("Sellers Dataset:")
-print(olist_sellers_dataset.head())
-print("Product Category Name Translation Dataset:")
-print(product_category_name_translation.head())
+# Comparação final dos modelos
+print(f"{'='*60}")
+print("COMPARAÇÃO DOS MODELOS")
+print(f"{'='*60}")
+print(f"{'Modelo':<25} {'R²':<10} {'MAE':<12} {'RMSE':<12} {'Acurácia':<10}")
+print(f"{'-'*60}")
+for model_name, metrics in results.items():
+    print(f"{model_name:<25} {metrics['R²']:<10.4f} R$ {metrics['MAE']:<9.2f} R$ {metrics['RMSE']:<9.2f} {metrics['Acurácia (±20%)']:<9.2f}%")
 
-print(olist_products_dataset.columns)
+# Identificar o melhor modelo baseado em R²
+best_model = max(results.items(), key=lambda x: x[1]['R²'])
+print(f"\n🏆 Melhor modelo (por R²): {best_model[0]} com R² = {best_model[1]['R²']:.4f}")
